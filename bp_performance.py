@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import argparse
 import datetime
 import itertools
 from jinja2 import Template
@@ -6,6 +7,7 @@ import json
 import pygal
 import time
 import threading
+import traceback
 from collections import defaultdict, deque, Counter
 from ciso8601 import parse_datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -13,16 +15,6 @@ from cheroot.wsgi import Server, PathInfoDispatcher
 from urllib.request import urlopen
 from werkzeug.wsgi import pop_path_info
 
-def stream_transactions(endpoint):
-    last_block_num = last_irreversible_block_number()
-    with ThreadPoolExecutor(4) as executor:
-        while True:
-            time.sleep(1.0)
-            block_num = last_irreversible_block_number()
-            for block in executor.map(get_block, range(last_block_num + 1, block_num + 1)):
-                print(list(block.keys()))
-                yield from block['transactions']
-            last_block_num = block_num
 
 class BPPerformance:
     def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=10, max_age=86400):
@@ -41,11 +33,14 @@ class BPPerformance:
         with ThreadPoolExecutor(4) as executor:
             while not self._stopped:
                 time.sleep(1.0)
-                block_num = self._last_irreversible_block_number()
-                for i in executor.map(self._handle_block,
-                                      range(self.last_block_num + 1, block_num + 1)):
-                    pass
-                self.last_block_num = block_num
+                try:
+                    block_num = self._last_irreversible_block_number()
+                    for i in range(self.last_block_num + 1, block_num + 1):
+                        executor.submit(self._handle_block, i)
+                    self.last_block_num = block_num
+                except Exception:  # Can we do better than this?
+                    traceback.print_exc()
+                    time.sleep(60)
 
     def stop(self):
         self._stopped = True
@@ -135,14 +130,54 @@ def index(bp_perf):
     def render_index(environ, start_response):
         template = Template("""<!DOCTYPE html>
         <html>
-          <head><title>Block Producer Performance</title></head>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+            <link rel="stylesheet"
+              href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css"
+              integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm"
+              crossorigin="anonymous">
+            <title>Block Producer Performance</title>
+          </head>
           <body>
-            <h1>Block Producer Performance</h1>
-            {% for chart in charts.keys() %}
-            <div>
-              <object width="60%" data="/chart/{{ chart | urlencode | escape }}"></object>
+            <nav class="navbar navbar-dark" style="background-color: #a301b5;">
+              <div class="navbar-brand">Block Producer Performance</div>
+            </nav>
+            <div class="container">
+              <div id="accordion">
+                {% for chart in charts.keys() %}
+                  <div class="card">
+                    <div class="card-header" id="heading{{ chart.replace(' ', '') }}">
+                      <h5 class="mb-0">
+                        <button class="btn btn-link"
+                            data-toggle="collapse"
+                            data-target="#{{ chart.replace(' ', '') }}"
+                            aria-expanded="false" aria-controls="{{ chart.replace(' ', '') }}">
+                          {{ chart }}
+                        </button>
+                      </h5>
+                    </div>
+
+                    <div id="{{ chart.replace(' ', '') }}"
+                        class="collapse"
+                        aria-labelledby="heading{{ chart.replace(' ', '') }}"
+                        data-parent="#accordion">
+                      <div class="card-body">
+                        <object data="/chart/{{ chart | urlencode | escape }}"></object>
+                      </div>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
             </div>
-            {% endfor %}
+            <script src="https://code.jquery.com/jquery-3.2.1.slim.min.js"
+              integrity="sha384-KJ3o2DKtIkvYIK3UENzmM7KCkRr/rE9/Qpg6aAZGJwFDMVNA/GpGFF93hXpG5KkN"
+              crossorigin="anonymous"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.12.9/umd/popper.min.js"
+              integrity="sha384-ApNbgh9B+Y1QKtv3Rn7W3mgPxhU9K/ScQsAP7hUibX39j7fakFPskvXusvfa0b4Q"
+              crossorigin="anonymous"></script>
+            <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/js/bootstrap.min.js"
+              integrity="sha384-JZR6Spejh4U02d8jOt6vLEHfe/JQGiRRSQQxSfFWpi1MquVdAyjUar5+76PVCmYl"
+              crossorigin="anonymous"></script>
           </body>
         </html>
         """)
@@ -151,20 +186,30 @@ def index(bp_perf):
         return [rendered.encode('utf-8')]
     return render_index
 
+
+classifiers = {
+    ('eosio.token', 'transfer'): lambda x: 'Simple Transfer',
+    ('blocktwitter', 'tweet'): lambda x: 'WE LOVE BM' if x['data']['message'] == 'WE LOVE BM' else None,
+    ('eosbetdice11', 'resolvebet'): lambda x: 'EOS Bet',
+    ('eosknightsio', 'rebirth'): lambda x: 'EOS Knights Rebirth',
+    ('eosio', 'delegatebw'): lambda x: 'Delegate resources',
+    ('eosio', 'undelegatebw'): lambda x: 'Undelegate resources',
+    ('eosio', 'voteproducer'): lambda x: 'Block producer vote',
+    ('eosio', 'buyram'): lambda x: 'Buy RAM',
+    ('eosio', 'sellram'): lambda x: 'Sell RAM'
+}
+
+
 if __name__ == '__main__':
-    bp_perf = BPPerformance({
-        ('eosio.token', 'transfer'): lambda x: 'Simple Transfer',
-        ('blocktwitter', 'tweet'): lambda x: 'WE LOVE BM' if x['data']['message'] == 'WE LOVE BM' else None,
-        ('eosbetdice11', 'resolvebet'): lambda x: 'EOS Bet',
-        ('epraofficial', 'transfer'): lambda x: 'PRA',
-        ('prochaintech', 'click'): lambda x: 'Prochain click',
-        ('eosknightsio', 'rebirth'): lambda x: 'EOS Knights Rebirth',
-        ('eosio', 'delegatebw'): lambda x: 'Delegate resources',
-        ('eosio', 'undelegatebw'): lambda x: 'Undelegate resources',
-        ('eosio', 'voteproducer'): lambda x: 'Block producer vote',
-        ('eosio', 'buyram'): lambda x: 'Buy RAM',
-        ('eosio', 'sellram'): lambda x: 'Sell RAM'
-    })
+    parser = argparse.ArgumentParser(
+        description="Run a web server with stats about EOS block producer performance")
+    parser.add_argument('--nodeos-url', nargs='?', default="http://localhost:8888")
+    parser.add_argument('--host', nargs='?', default='0.0.0.0')
+    parser.add_argument('--port', nargs='?', default=8953, type=int)
+    parser.add_argument('--certificate', nargs='?', help='TLS cert location')
+    parser.add_argument('--key', nargs='?', help='TLS private key location')
+    args = parser.parse_args()
+    bp_perf = BPPerformance(classifiers, endpoint=args.nodeos_url)
     thread = threading.Thread(target=bp_perf.watch)
     thread.start()
 
@@ -172,9 +217,15 @@ if __name__ == '__main__':
         '/': index(bp_perf),
         '/chart': chart_renderer(bp_perf)
     })
-    httpd = Server(('0.0.0.0', 8080), app)
+
+    httpd = Server((args.host, args.port), app)
+
+    if args.certificate:
+        from cheroot.ssl.builtin import BuiltinSSLAdapter
+        httpd.ssl_adapter = BuiltinSSLAdapter(args.certificate, args.key)
+
     try:
-        print("Serving on 0.0.0.0:8080")
+        print(f"Serving on {args.host}:{args.port}")
         httpd.safe_start()
     finally:
         bp_perf.stop()

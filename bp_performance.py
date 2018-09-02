@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 import argparse
+import csv
 import datetime
+import io
 import itertools
-from jinja2 import Template
 import json
+import numpy
 import pygal
 import time
 import threading
@@ -12,13 +14,14 @@ from collections import defaultdict, deque, Counter
 from ciso8601 import parse_datetime
 from concurrent.futures import ThreadPoolExecutor
 from cheroot.wsgi import Server, PathInfoDispatcher
+from jinja2 import Template
 from urllib.request import urlopen
 from werkzeug.wsgi import pop_path_info
 from werkzeug.wrappers import Request, Response
 
 
 class BPPerformance:
-    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=10, max_age=86400):
+    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=86400):
         self._endpoint = endpoint
         self._classifiers = classifiers
         self._max_count = max_count
@@ -119,13 +122,50 @@ def chart_renderer(bp_perf):
             return [b"Chart not found"]
         else:
             data = stats[chart_name]
-            chart = pygal.Box(box_mode='tukey')
+            chart = pygal.Box(box_mode='tukey', width=1000, height=500)
             chart.title = chart_name
             for bp, data in data.items():
                 chart.add(bp, data)
             start_response('200 OK', [('content-type', 'image/svg+xml')])
             return [chart.render()]
     return render_chart
+
+def csv_dump(bp_perf):
+    def render_csv(environ, start_response):
+        output_file = io.StringIO()
+        writer = csv.DictWriter(
+            output_file, [
+                "Transaction Type",
+                "Block Producer",
+                "Minimum",
+                "First Quartile",
+                "Median",
+                "Mean",
+                "Third Quartile",
+                "99th Percentile",
+                "Maximum",
+                "Count"
+            ]
+        )
+        writer.writeheader()
+        for tx_type, tx_data in bp_perf.stats.items():
+            for bp, timing_data in tx_data.items():
+                writer.writerow({
+                    "Transaction Type": tx_type,
+                    "Block Producer": bp,
+                    "Minimum": min(timing_data),
+                    "First Quartile": numpy.percentile(timing_data, 0.25),
+                    "Median": numpy.percentile(timing_data, 0.25),
+                    "Mean": sum(timing_data) / len(timing_data),
+                    "Third Quartile": numpy.percentile(timing_data, 0.75),
+                    "99th Percentile": numpy.percentile(timing_data, 0.99),
+                    "Maximum": max(timing_data),
+                    "Count": len(timing_data)
+                })
+        result = output_file.getvalue().encode('utf-8')
+        start_response('200 OK', [('Content-Type', 'text/csv; charset=utf-8')])
+        return [result]
+    return render_csv
 
 def index(bp_perf):
     def render_index(environ, start_response):
@@ -144,28 +184,83 @@ def index(bp_perf):
               <div class="navbar-brand">Block Producer Performance</div>
             </nav>
             <div class="container">
-              <div id="accordion">
+              <ul class="nav nav-pills" style="padding-top: 1rem;">
+                <li class="nav-item">
+                  <a class="nav-link active"
+                      id="about-tab"
+                      data-toggle="tab"
+                      href="#about"
+                      role="tab"
+                      aria-controls="about"
+                      aria-selected="true">
+                    About
+                  </a>
+                </li>
                 {% for chart in charts.keys() %}
-                  <div class="card">
-                    <div class="card-header" id="heading{{ chart.replace(' ', '') }}">
-                      <h5 class="mb-0">
-                        <button class="btn btn-link"
-                            data-toggle="collapse"
-                            data-target="#{{ chart.replace(' ', '') }}"
-                            aria-expanded="false" aria-controls="{{ chart.replace(' ', '') }}">
-                          {{ chart }}
-                        </button>
-                      </h5>
-                    </div>
-
-                    <div id="{{ chart.replace(' ', '') }}"
-                        class="collapse"
-                        aria-labelledby="heading{{ chart.replace(' ', '') }}"
-                        data-parent="#accordion">
-                      <div class="card-body">
-                        <object data="/chart/{{ chart | urlencode | escape }}"></object>
-                      </div>
-                    </div>
+                  <li class="nav-item">
+                    <a class="nav-link"
+                        id="{{ chart.replace(' ', '') }}-tab"
+                        data-toggle="tab"
+                        href="#{{ chart.replace(' ', '') }}"
+                        role="tab"
+                        aria-controls="{{ chart.replace(' ', '') }}"
+                        aria-selected="true">
+                      {{ chart }}
+                    </a>
+                  </li>
+                {% endfor %}
+              </ul>
+              <div class="tab-content" style="padding-top: 1rem;">
+                <div class="tab-pane active"
+                    id="about"
+                    role="tabpanel"
+                    aria-labelledby="about-tab">
+                  <p>
+                    CPU billing in EOS is a bit different to other
+                    smart-contract based chains. CPU usage isn't objectively
+                    calculated, but measured - block producers run your
+                    transaction, time how long it took, and bill you
+                    accordingly.
+                  </p>
+                  <p>
+                    This makes it vitally important that you vote
+                    for good block producers. If a block producer uses cheap
+                    hardware, then they'll end up billing too much CPU, or
+                    billing CPU unfairly, which limits chain scalability. Even
+                    worse, a malicious block producer could overcharge an
+                    account that they don't like.
+                  </p>
+                  <p>
+                    Luckily, it's possible to keep an eye on how much block
+                    producers are billing.
+                  </p>
+                  <p>
+                    This site graphs the time block producers bill for a
+                    selection of common transaction types, over the last day
+                    (or the last 300 transactions of that type for the most
+                    common transaction types). Lower numbers are better, and
+                    more consistent numbers are better (on the box plots, this
+                    means bigger boxes are bad, and outliers, points way
+                    outside the boxes, are bad).
+                  </p>
+                  <p>
+                    If you've found this useful, consider donating to
+                    <tt>gmyteojxgmge</tt>. Right now, this site runs on my
+                    crappy home server, and with some donations, I could rent
+                    some less crappy hardware.
+                  </p>
+                  <p>
+                    <a href="/csv">
+                      Click here to download a CSV dump of the summary data.
+                    </a>
+                  </p>
+                </div>
+                {% for chart in charts.keys() %}
+                  <div class="tab-pane"
+                      id="{{ chart.replace(' ', '') }}"
+                      role="tabpanel"
+                      aria-labelledby="{{ chart.replace(' ', '') }}-tab">
+                    <object data="/chart/{{ chart | urlencode | escape }}"></object>
                   </div>
                 {% endfor %}
               </div>
@@ -209,7 +304,8 @@ def cache_middleware(expiry_seconds):
             req = Request(environ)
             path = req.path
             cached = cache.get(path)
-            if cached:
+            if cached and not (
+                    req.cache_control.no_store or req.cache_control.no_cache):
                 updated_time, content, status, headers = cached
                 if updated_time + expiry > datetime.datetime.now():
                     # Cached version still valid
@@ -253,10 +349,6 @@ def cache_middleware(expiry_seconds):
         return wrapped
     return wrapper
 
-def hello(environ, start_response):
-    start_response('200 OK', [('Content-Type', 'text/plain; charset=utf-8')])
-    return [datetime.datetime.now().isoformat().encode('utf-8')]
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Run a web server with stats about EOS block producer performance")
@@ -274,7 +366,7 @@ if __name__ == '__main__':
         PathInfoDispatcher({
             '/': index(bp_perf),
             '/chart': chart_renderer(bp_perf),
-            '/hello': hello
+            '/csv': csv_dump(bp_perf)
         })
     )
 

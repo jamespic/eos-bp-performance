@@ -1,5 +1,6 @@
 cheroot
 ciso8601
 jinja2
+numpy
 pygal
 werkzeug

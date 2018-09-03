@@ -154,11 +154,11 @@ def csv_dump(bp_perf):
                     "Transaction Type": tx_type,
                     "Block Producer": bp,
                     "Minimum": min(timing_data),
-                    "First Quartile": numpy.percentile(timing_data, 0.25),
-                    "Median": numpy.percentile(timing_data, 0.25),
+                    "First Quartile": numpy.percentile(timing_data, 25),
+                    "Median": numpy.percentile(timing_data, 50),
                     "Mean": sum(timing_data) / len(timing_data),
-                    "Third Quartile": numpy.percentile(timing_data, 0.75),
-                    "99th Percentile": numpy.percentile(timing_data, 0.99),
+                    "Third Quartile": numpy.percentile(timing_data, 75),
+                    "99th Percentile": numpy.percentile(timing_data, 99),
                     "Maximum": max(timing_data),
                     "Count": len(timing_data)
                 })
@@ -247,7 +247,9 @@ def index(bp_perf):
                     If you've found this useful, consider donating to
                     <tt>gmyteojxgmge</tt>. Right now, this site runs on my
                     crappy home server, and with some donations, I could rent
-                    some less crappy hardware.
+                    some less crappy hardware. The source code is at
+                    <a href="https://github.com/jamespic/eos-bp-performance">
+                    https://github.com/jamespic/eos-bp-performance</a>.
                   </p>
                   <p>
                     <a href="/csv">

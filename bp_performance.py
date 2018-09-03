@@ -163,7 +163,10 @@ def csv_dump(bp_perf):
                     "Count": len(timing_data)
                 })
         result = output_file.getvalue().encode('utf-8')
-        start_response('200 OK', [('Content-Type', 'text/csv; charset=utf-8')])
+        start_response('200 OK', [
+            ('Content-Type', 'text/csv; charset=utf-8'),
+            ('Content-Disposition', 'attachment; filename="bp-perf.csv"')
+        ])
         return [result]
     return render_csv
 

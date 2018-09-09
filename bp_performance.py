@@ -10,6 +10,7 @@ import pygal
 import time
 import threading
 import traceback
+import sys
 from collections import defaultdict, deque, Counter
 from ciso8601 import parse_datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -33,15 +34,19 @@ class BPPerformance:
 
     def watch(self):
         self._stopped = False
-        self.last_block_num = self._last_irreversible_block_number()
+        self.last_block_num = self._last_irreversible_block_number() - 7200  # Prepopulate with last hour
         with ThreadPoolExecutor(4) as executor:
             while not self._stopped:
                 time.sleep(1.0)
                 try:
                     block_num = self._last_irreversible_block_number()
-                    for i in range(self.last_block_num + 1, block_num + 1):
-                        executor.submit(self._handle_block, i)
-                    self.last_block_num = block_num
+                    if block_num != self.last_block_num:
+                        print(f"Fetching data for blocks {self.last_block_num + 1} to {block_num}", file=sys.stderr)
+                        for block in executor.map(
+                                self._get_block,
+                                range(self.last_block_num + 1, block_num + 1)):
+                            self._handle_block(block)
+                        self.last_block_num = block_num
                 except Exception:  # Can we do better than this?
                     traceback.print_exc()
                     time.sleep(60)
@@ -60,8 +65,7 @@ class BPPerformance:
             for category, bps in self._stats.items()
         }
 
-    def _handle_block(self, block_num):
-        block = self._get_block(block_num)
+    def _handle_block_transactions(self, block):
         timestamp = parse_datetime(block['timestamp'])
         producer = block['producer']
         for tx in block['transactions']:
@@ -80,6 +84,9 @@ class BPPerformance:
                     else:
                         self.unknown[f"{action['account']} {action['name']}"] += 1
 
+    def _handle_block(self, block):
+        self._handle_block_transactions(block)
+        timestamp = parse_datetime(block['timestamp'])
         self._last_timestamp = timestamp
 
     def _store_value(self, producer, category, timestamp, time):

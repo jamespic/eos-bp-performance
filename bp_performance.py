@@ -250,25 +250,38 @@ def csv_dump(bp_perf):
         result = output_file.getvalue().encode('utf-8')
         start_response('200 OK', [
             ('Content-Type', 'text/csv; charset=utf-8'),
-            ('Content-Disposition', 'attachment; filename="bp-perf.csv"')
+            ('Content-Disposition', 'attachment; filename="transactions.csv"')
         ])
         return [result]
+    return render_csv
+
+def missed_slots_csv(bp_perf):
+    def render_csv(environ, start_response):
+        data = bp_perf.missed_blocks
+        output_file = io.StringIO()
+        writer = csv.DictWriter(
+            output_file, ['Slot'] + list(data.keys())
+        )
+        writer.writeheader()
+        for i in range(12):
+            writer.writerow(dict(Slot=str(i), **{producer: str(slots[i]) for producer, slots in data.items()}))
+        start_response('200 OK', [
+            ('Content-Type', 'text/csv; charset=utf-8'),
+            ('Content-Disposition', 'attachment; filename="missed_slots.csv"')
+        ])
+        return [output_file.getvalue().encode('utf-8')]
     return render_csv
 
 def missed_slots(bp_perf):
     def render_slots(environ, start_response):
         data = bp_perf.missed_blocks
-        if environ.get('HTTP_ACCEPT') == 'application/json':
-            start_response('200 OK', [('Content-Type', 'application/json')])
-            return [json.dumps(data).encode('utf-8')]
-        else:
-            chart = pygal.Bar(width=1000, height=600)
-            chart.title = 'Missed Slots'
-            chart.x_labels = data.keys()
-            for i in range(12):
-                chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
-            start_response('200 OK', [('content-type', 'image/svg+xml')])
-            return [chart.render()]
+        chart = pygal.Bar(width=1000, height=600)
+        chart.title = 'Missed Slots'
+        chart.x_labels = list(data.keys())
+        for i in range(12):
+            chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
+        start_response('200 OK', [('content-type', 'image/svg+xml')])
+        return [chart.render()]
     return render_slots
 
 def index(bp_perf):
@@ -367,10 +380,12 @@ def index(bp_perf):
                     https://github.com/jamespic/eos-bp-performance</a>.
                   </p>
                   <p>
-                    <a href="/csv">
-                      Click here to download a CSV dump of the summary data.
-                    </a>
+                    You can also download the data in CSV form:
                   </p>
+                  <ul>
+                    <li><a href="/transactions.csv">Transaction Summary</a></li>
+                    <li><a href="/missed_slots.csv">Missed Slots</a></li>
+                  </ul>
                 </div>
                 <div class="tab-pane"
                     id="missed-slots"
@@ -490,8 +505,9 @@ if __name__ == '__main__':
         PathInfoDispatcher({
             '/': index(bp_perf),
             '/chart': chart_renderer(bp_perf),
-            '/csv': csv_dump(bp_perf),
-            '/missed_slots': missed_slots(bp_perf)
+            '/transactions.csv': csv_dump(bp_perf),
+            '/missed_slots': missed_slots(bp_perf),
+            '/missed_slots.csv': missed_slots_csv(bp_perf)
         })
     )
 

@@ -84,6 +84,25 @@ class BPPerformance:
             ] for producer, slots in sorted(result.items())
         }
 
+    @property
+    def transactions_per_block(self):
+        blocks = list(self._block_summaries)
+        action_types = {action_type for block in blocks for action_type in block.action_counts.keys()}
+        action_counts = defaultdict(lambda: {action_type: 0 for action_type in action_types})
+        block_counts = defaultdict(int)
+        for block in blocks:
+            if block.produced:
+                block_counts[block.producer] += 1
+                for action_type, count in block.action_counts.items():
+                    action_counts[block.producer][action_type] += count
+        return {
+            producer: {
+                action_type: count / block_counts[producer]
+                for action_type, count in action_types.items()
+            } for producer, action_types in action_counts.items()
+        }
+
+
     def _handle_block_transactions(self, block):
         timestamp = parse_datetime(block['timestamp'])
         producer = block['producer']
@@ -101,7 +120,7 @@ class BPPerformance:
                         if category:
                             self._store_value(producer, category, timestamp, cpu)
                     else:
-                        self.unknown[f"{action['account']} {action['name']}"] += 1
+                        self.unknown[f"{action['account']}:{action['name']}"] += 1
 
     def _handle_block_summaries(self, block):
         timestamp = parse_datetime(block['timestamp'])
@@ -128,7 +147,7 @@ class BPPerformance:
                 if isinstance(tx['trx'], dict):
                     actions = tx['trx']['transaction']['actions']
                     for action in actions:
-                        action_counts[(action['account'], action['name'])] += 1
+                        action_counts[f"{action['account']}:{action['name']}"] += 1
             block_summary = _BlockSummary(timestamp, block['producer'], slot_position, True, action_counts)
             self._block_summaries.append(block_summary)
         while len(self._block_summaries) > self._max_age * 2:
@@ -198,7 +217,7 @@ def _block_producer_for_timestamp(timestamp, schedule):
     slot = _timestamp_to_slot(timestamp)
     return schedule[(slot % (len(schedule) * 12)) // 12], slot % 12
 
-def chart_renderer(bp_perf):
+def transaction_chart(bp_perf):
     def render_chart(environ, start_response):
         stats = bp_perf.stats
         chart_name = pop_path_info(environ)
@@ -215,7 +234,7 @@ def chart_renderer(bp_perf):
             return [chart.render()]
     return render_chart
 
-def csv_dump(bp_perf):
+def transaction_csv(bp_perf):
     def render_csv(environ, start_response):
         output_file = io.StringIO()
         writer = csv.DictWriter(
@@ -255,6 +274,18 @@ def csv_dump(bp_perf):
         return [result]
     return render_csv
 
+def missed_slots(bp_perf):
+    def render_slots(environ, start_response):
+        data = bp_perf.missed_blocks
+        chart = pygal.Bar(width=1000, height=600)
+        chart.title = 'Missed Slots'
+        chart.x_labels = list(data.keys())
+        for i in range(12):
+            chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
+        start_response('200 OK', [('content-type', 'image/svg+xml')])
+        return [chart.render()]
+    return render_slots
+
 def missed_slots_csv(bp_perf):
     def render_csv(environ, start_response):
         data = bp_perf.missed_blocks
@@ -272,17 +303,26 @@ def missed_slots_csv(bp_perf):
         return [output_file.getvalue().encode('utf-8')]
     return render_csv
 
-def missed_slots(bp_perf):
-    def render_slots(environ, start_response):
-        data = bp_perf.missed_blocks
+def transactions_per_block(bp_perf):
+    def render_counts(environ, start_response):
+        data = bp_perf.transactions_per_block
         chart = pygal.Bar(width=1000, height=600)
-        chart.title = 'Missed Slots'
-        chart.x_labels = list(data.keys())
-        for i in range(12):
-            chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
+        chart.title = "Transactions per Block"
+        for producer, action_counts in sorted(data.items()):
+            if not hasattr(chart, 'x_labels'):
+                chart.x_labels = [
+                    action_type
+                    for action_type, count
+                    in sorted(action_counts.items(), key=lambda x: -x[1])[:10]
+                ]
+            chart.add(
+                producer, [
+                    action_counts[action_type] for action_type in chart.x_labels
+                ]
+            )
         start_response('200 OK', [('content-type', 'image/svg+xml')])
         return [chart.render()]
-    return render_slots
+    return render_counts
 
 def index(bp_perf):
     def render_index(environ, start_response):
@@ -322,6 +362,17 @@ def index(bp_perf):
                       aria-controls="missed-slots"
                       aria-selected="true">
                     Missed Slots
+                  </a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link"
+                      id="transactions-per-block-tab"
+                      data-toggle="tab"
+                      href="#transactions-per-block"
+                      role="tab"
+                      aria-controls="transactions-per-block"
+                      aria-selected="true">
+                    Transactions per Block
                   </a>
                 </li>
                 {% for chart in charts.keys() %}
@@ -392,6 +443,12 @@ def index(bp_perf):
                     role="tabpanel"
                     aria-labelledby="missed-slots-tab">
                   <object data="/missed_slots"></object>
+                </div>
+                <div class="tab-pane"
+                    id="transactions-per-block"
+                    role="tabpanel"
+                    aria-labelledby="transactions-per-block-tab">
+                  <object data="/transactions_per_block"></object>
                 </div>
                 {% for chart in charts.keys() %}
                   <div class="tab-pane"
@@ -504,10 +561,11 @@ if __name__ == '__main__':
     app = cache_middleware(60)(
         PathInfoDispatcher({
             '/': index(bp_perf),
-            '/chart': chart_renderer(bp_perf),
-            '/transactions.csv': csv_dump(bp_perf),
+            '/chart': transaction_chart(bp_perf),
+            '/transactions.csv': transaction_csv(bp_perf),
             '/missed_slots': missed_slots(bp_perf),
-            '/missed_slots.csv': missed_slots_csv(bp_perf)
+            '/missed_slots.csv': missed_slots_csv(bp_perf),
+            '/transactions_per_block': transactions_per_block(bp_perf)
         })
     )
 

@@ -11,7 +11,7 @@ import time
 import threading
 import traceback
 import sys
-from collections import defaultdict, deque, Counter
+from collections import defaultdict, deque, Counter, namedtuple
 from ciso8601 import parse_datetime
 from concurrent.futures import ThreadPoolExecutor
 from cheroot.wsgi import Server, PathInfoDispatcher
@@ -20,6 +20,10 @@ from urllib.request import urlopen
 from werkzeug.wsgi import pop_path_info
 from werkzeug.wrappers import Request, Response
 
+_BlockSummary = namedtuple(
+    '_BlockSummary',
+    ['timestamp', 'producer', 'slot_position', 'produced', 'action_counts']
+)
 
 class BPPerformance:
     def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=86400):
@@ -29,12 +33,15 @@ class BPPerformance:
         self._max_age = max_age
         self._stopped = True
         self._stats = defaultdict(lambda: defaultdict(deque))
+        self._block_summaries = deque()
         self._last_timestamp = datetime.datetime(1970, 1, 1)
+        self._schedules = {}
         self.unknown = Counter()
 
     def watch(self):
         self._stopped = False
         self.last_block_num = self._last_irreversible_block_number() - 7200  # Prepopulate with last hour
+        self._find_producer_schedules()
         with ThreadPoolExecutor(4) as executor:
             while not self._stopped:
                 time.sleep(1.0)
@@ -65,6 +72,18 @@ class BPPerformance:
             for category, bps in self._stats.items()
         }
 
+    @property
+    def missed_blocks(self):
+        result = defaultdict(lambda: [[] for _ in range(12)])
+        for block in self._block_summaries:
+            result[block.producer][block.slot_position].append(block.produced)
+        return {
+            producer: [
+                sum(slot_data) * 100.0 / len(slot_data) if slot_data else 100.0
+                for slot_data in slots
+            ] for producer, slots in sorted(result.items())
+        }
+
     def _handle_block_transactions(self, block):
         timestamp = parse_datetime(block['timestamp'])
         producer = block['producer']
@@ -84,8 +103,59 @@ class BPPerformance:
                     else:
                         self.unknown[f"{action['account']} {action['name']}"] += 1
 
+    def _handle_block_summaries(self, block):
+        timestamp = parse_datetime(block['timestamp'])
+        if self._block_summaries:
+            # Fill in gaps in producer schedule
+            last_block = self._block_summaries[-1]
+            last_timestamp = last_block.timestamp
+            slots_missed = int((timestamp - last_timestamp).total_seconds() * 2) - 1
+            for i in range(slots_missed):
+                schedule = self._schedules.get(block['schedule_version'])
+                if schedule:
+                    missed_timestamp = last_timestamp + (i + 1) * datetime.timedelta(seconds=0.5)
+                    producer, slot_position = _block_producer_for_timestamp(missed_timestamp, schedule)
+                    missed_block_summary = _BlockSummary(missed_timestamp, producer, slot_position, False, Counter())
+                    self._block_summaries.append(missed_block_summary)
+        if block['new_producers']:
+            self._load_schedule(block['new_producers'])
+        schedule = self._schedules.get(block['schedule_version'])
+        if schedule:
+            expected_producer, slot_position = _block_producer_for_timestamp(timestamp, schedule)
+            assert expected_producer == block['producer']
+            action_counts = Counter()
+            for tx in block['transactions']:
+                if isinstance(tx['trx'], dict):
+                    actions = tx['trx']['transaction']['actions']
+                    for action in actions:
+                        action_counts[(action['account'], action['name'])] += 1
+            block_summary = _BlockSummary(timestamp, block['producer'], slot_position, True, action_counts)
+            self._block_summaries.append(block_summary)
+        while len(self._block_summaries) > self._max_age * 2:
+            self._block_summaries.popleft()
+
+
+    def _find_producer_schedules(self):
+        info = json.load(urlopen(f"{self._endpoint}/v1/chain/get_info"))
+        head_block_num = info['head_block_num']
+        header_block_state = json.load(
+            urlopen(
+                f"{self._endpoint}/v1/chain/get_block_header_state",
+                json.dumps({"block_num_or_id":head_block_num}).encode('utf-8')
+            )
+        )
+        self._load_schedule(header_block_state['active_schedule'])
+        pending_schedule_version = header_block_state['pending_schedule']['version']
+        if pending_schedule_version not in self._schedules:
+            self._load_schedule(header_block_state['pending_schedule'])
+
+    def _load_schedule(self, schedule):
+        version = schedule['version']
+        self._schedules[version] = [producer['producer_name'] for producer in schedule['producers']]
+
     def _handle_block(self, block):
         self._handle_block_transactions(block)
+        self._handle_block_summaries(block)
         timestamp = parse_datetime(block['timestamp'])
         self._last_timestamp = timestamp
 
@@ -120,6 +190,14 @@ class BPPerformance:
             )
         )
 
+def _timestamp_to_slot(timestamp):
+    epoch_time = timestamp - datetime.datetime.fromtimestamp(946684800)
+    return int(epoch_time.total_seconds() * 2)
+
+def _block_producer_for_timestamp(timestamp, schedule):
+    slot = _timestamp_to_slot(timestamp)
+    return schedule[(slot % (len(schedule) * 12)) // 12], slot % 12
+
 def chart_renderer(bp_perf):
     def render_chart(environ, start_response):
         stats = bp_perf.stats
@@ -129,7 +207,7 @@ def chart_renderer(bp_perf):
             return [b"Chart not found"]
         else:
             data = stats[chart_name]
-            chart = pygal.Box(box_mode='tukey', width=1000, height=500)
+            chart = pygal.Box(box_mode='tukey', width=1000, height=600)
             chart.title = chart_name
             for bp, data in data.items():
                 chart.add(bp, data)
@@ -177,6 +255,22 @@ def csv_dump(bp_perf):
         return [result]
     return render_csv
 
+def missed_slots(bp_perf):
+    def render_slots(environ, start_response):
+        data = bp_perf.missed_blocks
+        if environ.get('HTTP_ACCEPT') == 'application/json':
+            start_response('200 OK', [('Content-Type', 'application/json')])
+            return [json.dumps(data).encode('utf-8')]
+        else:
+            chart = pygal.Bar(width=1000, height=600)
+            chart.title = 'Missed Slots'
+            chart.x_labels = data.keys()
+            for i in range(12):
+                chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
+            start_response('200 OK', [('content-type', 'image/svg+xml')])
+            return [chart.render()]
+    return render_slots
+
 def index(bp_perf):
     def render_index(environ, start_response):
         template = Template("""<!DOCTYPE html>
@@ -204,6 +298,17 @@ def index(bp_perf):
                       aria-controls="about"
                       aria-selected="true">
                     About
+                  </a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link"
+                      id="missed-slots-tab"
+                      data-toggle="tab"
+                      href="#missed-slots"
+                      role="tab"
+                      aria-controls="missed-slots"
+                      aria-selected="true">
+                    Missed Slots
                   </a>
                 </li>
                 {% for chart in charts.keys() %}
@@ -267,6 +372,12 @@ def index(bp_perf):
                     </a>
                   </p>
                 </div>
+                <div class="tab-pane"
+                    id="missed-slots"
+                    role="tabpanel"
+                    aria-labelledby="missed-slots-tab">
+                  <object data="/missed_slots"></object>
+                </div>
                 {% for chart in charts.keys() %}
                   <div class="tab-pane"
                       id="{{ chart.replace(' ', '') }}"
@@ -299,7 +410,8 @@ classifiers = {
     ('eosio.token', 'transfer'): lambda x: 'Simple Transfer',
     ('blocktwitter', 'tweet'): lambda x: 'WE LOVE BM' if x['data']['message'] == 'WE LOVE BM' else None,
     ('eosbetdice11', 'resolvebet'): lambda x: 'EOS Bet',
-    ('eosknightsio', 'rebirth'): lambda x: 'EOS Knights Rebirth',
+    ('eosknightsio', 'rebirth2'): lambda x: 'EOS Knights Rebirth',
+    ('prochaintech', 'click'): lambda x: 'Prochain Click',
     ('eosio', 'delegatebw'): lambda x: 'Delegate resources',
     ('eosio', 'undelegatebw'): lambda x: 'Undelegate resources',
     ('eosio', 'voteproducer'): lambda x: 'Block producer vote',
@@ -378,7 +490,8 @@ if __name__ == '__main__':
         PathInfoDispatcher({
             '/': index(bp_perf),
             '/chart': chart_renderer(bp_perf),
-            '/csv': csv_dump(bp_perf)
+            '/csv': csv_dump(bp_perf),
+            '/missed_slots': missed_slots(bp_perf)
         })
     )
 

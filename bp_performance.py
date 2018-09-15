@@ -26,7 +26,7 @@ _BlockSummary = namedtuple(
 )
 
 class BPPerformance:
-    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=7*86400):
+    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=3*86400):
         self._endpoint = endpoint
         self._classifiers = classifiers
         self._max_count = max_count
@@ -40,7 +40,7 @@ class BPPerformance:
 
     def watch(self):
         self._stopped = False
-        self.last_block_num = self._last_irreversible_block_number() - 7200  # Prepopulate with last hour
+        self.last_block_num = self._last_irreversible_block_number() - 28800  # Prepopulate with last 4 hours
         self._find_producer_schedules()
         with ThreadPoolExecutor(4) as executor:
             while not self._stopped:
@@ -77,7 +77,7 @@ class BPPerformance:
     @property
     def missed_blocks(self):
         result = defaultdict(lambda: [[] for _ in range(12)])
-        for block in self._block_summaries:
+        for block in list(self._block_summaries):
             result[block.producer][block.slot_position].append(block.produced)
         return {
             producer: [
@@ -288,7 +288,7 @@ def missed_slots(bp_perf):
     def render_slots(environ, start_response):
         data = bp_perf.missed_blocks
         chart = pygal.Bar(width=1200, height=600)
-        chart.title = 'Missed Slots'
+        chart.title = 'Hit/Missed Slots'
         chart.x_labels = list(data.keys())
         for i in range(12):
             chart.add(f"Slot {i}", [slots[i] for slots in data.values()])
@@ -312,6 +312,31 @@ def missed_slots_csv(bp_perf):
         ])
         return [output_file.getvalue().encode('utf-8')]
     return render_csv
+
+def _round_timestamp(timestamp, epochs=1):
+    epoch_offset = _timestamp_to_slot(timestamp) % (21 * 12 * epochs)
+    return timestamp - datetime.timedelta(seconds=0.5*epoch_offset)
+
+def missed_slots_by_time(bp_perf):
+    def render_chart(environ, start_response):
+        data = list(bp_perf._block_summaries)
+        series_data = defaultdict(lambda: defaultdict(list))
+        for summary in data:
+            time_slot = _round_timestamp(summary.timestamp, 10)
+            series_data[summary.producer][time_slot].append(not summary.produced)
+        chart = pygal.DateTimeLine(width=1200, height=600)
+        chart.title = "Missed Slots"
+        for producer, series in series_data.items():
+            chart.add(
+                producer,
+                [
+                    (time_slot, 100 * sum(missed) / len(missed))
+                    for time_slot, missed in series.items()
+                ]
+            )
+        start_response('200 OK', [('content-type', 'image/svg+xml')])
+        return [chart.render()]
+    return render_chart
 
 def transactions_per_block(bp_perf):
     def render_counts(environ, start_response):
@@ -347,7 +372,7 @@ def index(bp_perf):
             <title>Block Producer Performance</title>
           </head>
           <body>
-            <nav class="navbar navbar-dark" style="background-color: #a301b5;">
+            <nav class="navbar navbar-dark" style="background-color: #8100a8;">
               <div class="navbar-brand">Block Producer Performance</div>
             </nav>
             <div class="container-fluid">
@@ -384,6 +409,15 @@ def index(bp_perf):
                       aria-selected="false">
                     By Slot
                   </a>
+                  <a id="missed-slots-by-time-tab"
+                      class="nav-link ml-3"
+                      data-toggle="pill"
+                      href="#missed-slots-by-time"
+                      role="tab"
+                      aria-controls="missed-slots-by-time"
+                      aria-selected="false">
+                    By Time
+                  </a>
                   <span class="nav-item nav-link">Action Timings</span>
                   {% for chart in charts.keys() %}
                     <a id="{{ chart.replace(' ', '') }}-tab"
@@ -402,6 +436,8 @@ def index(bp_perf):
                       id="about"
                       role="tabpanel"
                       aria-labelledby="about-tab">
+                    <h1>About</h1>
+                    <h2>CPU Billing</h2>
                     <p>
                       CPU billing in EOS is a bit different to other
                       smart-contract based chains. CPU usage isn't objectively
@@ -423,13 +459,58 @@ def index(bp_perf):
                     </p>
                     <p>
                       This site graphs the time block producers bill for a
-                      selection of common transaction types, over the last day
-                      (or the last 300 transactions of that type for the most
-                      common transaction types). Lower numbers are better, and
-                      more consistent numbers are better (on the box plots, this
-                      means bigger boxes are bad, and outliers, points way
+                      selection of common transaction types, over the last 3
+                      days (or the last 1000 transactions of that type for the
+                      most common transaction types). Lower numbers are better,
+                      and more consistent numbers are better (on the box plots,
+                      this means bigger boxes are bad, and outliers, points way
                       outside the boxes, are bad).
                     </p>
+                    <h2>Missed Blocks</h2>
+                    <p>
+                      Since these numbers are self-reported by the block
+                      producers, it's conceivable that they may mis-report them
+                      to make themselves look better. If so, this could lead
+                      to missed block production slots or propagation delays.
+                      To detect this, we've also added graphs on missed block
+                      production slots.
+                    </p>
+                    <p>
+                      Each block producer gets a 6 second window in which they
+                      can produce up to 12 blocks, in 12 half-second slots.
+                      The Missed Blocks by Slot graph shows this.
+                    </p>
+                    <p>
+                      If a producer
+                      missed blocks at the start or end of their window, then
+                      this typically means there are propagation issues with
+                      the producer after or before them (respectively), and
+                      there's usually a corresponding dip in the other
+                      producer's numbers. It's hard to say whose fault an issue
+                      like this is, especially if block producers are a long way
+                      away from each other, so the network between them could
+                      be the problem.
+                    </p>
+                    <p>
+                      If a producer misses blocks in the middle of a window,
+                      then this is more likely to mean that their servers are
+                      overloaded, which might be a sign that they're fudging the
+                      CPU numbers.
+                    </p>
+                    <h2>Transactions per Block</h2>
+                    <p>
+                      One way a producer might try and cheat <em>both</em>
+                      numbers is to put fewer transactions in their blocks,
+                      so they don't have as much work to do. To detect this,
+                      we've added a graph showing how many transactions a
+                      producer typically includes in their blocks. There are
+                      legitimate reasons that a producer might choose to
+                      include fewer transactions in their blocks than others,
+                      such as greylisting, but unusually low numbers for
+                      blocks per transaction, for a producer whose other numbers
+                      are good, should be a red flag.
+                    </p>
+                    <h2>Donations</h2>
                     <p>
                       If you've found this useful, consider donating to
                       <tt>gmyteojxgmge</tt>. Right now, this site runs on my
@@ -451,6 +532,12 @@ def index(bp_perf):
                       role="tabpanel"
                       aria-labelledby="missed-slots-tab">
                     <object data="/missed_slots"></object>
+                  </div>
+                  <div class="tab-pane"
+                      id="missed-slots-by-time"
+                      role="tabpanel"
+                      aria-labelledby="missed-slots-by-time-tab">
+                    <object data="/missed_slots_by_time"></object>
                   </div>
                   <div class="tab-pane"
                       id="transactions-per-block"
@@ -573,6 +660,7 @@ if __name__ == '__main__':
             '/chart': transaction_chart(bp_perf),
             '/transactions.csv': transaction_csv(bp_perf),
             '/missed_slots': missed_slots(bp_perf),
+            '/missed_slots_by_time': missed_slots_by_time(bp_perf),
             '/missed_slots.csv': missed_slots_csv(bp_perf),
             '/transactions_per_block': transactions_per_block(bp_perf)
         })

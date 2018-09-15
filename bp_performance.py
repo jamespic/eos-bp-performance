@@ -26,7 +26,7 @@ _BlockSummary = namedtuple(
 )
 
 class BPPerformance:
-    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=86400):
+    def __init__(self, classifiers, endpoint="http://localhost:8888", max_count=300, max_age=7*86400):
         self._endpoint = endpoint
         self._classifiers = classifiers
         self._max_count = max_count
@@ -47,12 +47,14 @@ class BPPerformance:
                 time.sleep(1.0)
                 try:
                     block_num = self._last_irreversible_block_number()
-                    if block_num != self.last_block_num:
-                        print(f"Fetching data for blocks {self.last_block_num + 1} to {block_num}", file=sys.stderr)
-                        for block in executor.map(
-                                self._get_block,
-                                range(self.last_block_num + 1, block_num + 1)):
-                            self._handle_block(block)
+                    try:
+                        if block_num != self.last_block_num:
+                            print(f"Fetching data for blocks {self.last_block_num + 1} to {block_num}", file=sys.stderr)
+                            for block in executor.map(
+                                    self._get_block,
+                                    range(self.last_block_num + 1, block_num + 1)):
+                                self._handle_block(block)
+                    finally:
                         self.last_block_num = block_num
                 except Exception:  # Can we do better than this?
                     traceback.print_exc()
@@ -155,13 +157,17 @@ class BPPerformance:
 
 
     def _find_producer_schedules(self):
-        info = json.load(urlopen(f"{self._endpoint}/v1/chain/get_info"))
+        info = json.loads(
+            urlopen(
+                f"{self._endpoint}/v1/chain/get_info"
+            ).read().decode('utf-8', errors='replace')
+        )
         head_block_num = info['head_block_num']
-        header_block_state = json.load(
+        header_block_state = json.loads(
             urlopen(
                 f"{self._endpoint}/v1/chain/get_block_header_state",
                 json.dumps({"block_num_or_id":head_block_num}).encode('utf-8')
-            )
+            ).read().decode('utf-8', errors='replace')
         )
         self._load_schedule(header_block_state['active_schedule'])
         pending_schedule_version = header_block_state['pending_schedule']['version']
@@ -196,17 +202,21 @@ class BPPerformance:
         return queue
 
     def _last_irreversible_block_number(self):
-        info = json.load(urlopen(f"{self._endpoint}/v1/chain/get_info"))
+        info = json.loads(
+            urlopen(
+                f"{self._endpoint}/v1/chain/get_info"
+            ).read().decode('utf-8', errors='replace')
+        )
         return info['last_irreversible_block_num']
 
     def _get_block(self, block):
-        return json.load(
+        return json.loads(
             urlopen(
                 f"{self._endpoint}/v1/chain/get_block",
                 json.dumps({
                     "block_num_or_id": str(block)
                 }).encode('utf-8')
-            )
+            ).read().decode('utf-8', errors='replace')
         )
 
 def _timestamp_to_slot(timestamp):
@@ -226,7 +236,7 @@ def transaction_chart(bp_perf):
             return [b"Chart not found"]
         else:
             data = stats[chart_name]
-            chart = pygal.Box(box_mode='tukey', width=1000, height=600)
+            chart = pygal.Box(box_mode='tukey', width=1200, height=600)
             chart.title = chart_name
             for bp, data in data.items():
                 chart.add(bp, data)
@@ -277,7 +287,7 @@ def transaction_csv(bp_perf):
 def missed_slots(bp_perf):
     def render_slots(environ, start_response):
         data = bp_perf.missed_blocks
-        chart = pygal.Bar(width=1000, height=600)
+        chart = pygal.Bar(width=1200, height=600)
         chart.title = 'Missed Slots'
         chart.x_labels = list(data.keys())
         for i in range(12):
@@ -306,7 +316,7 @@ def missed_slots_csv(bp_perf):
 def transactions_per_block(bp_perf):
     def render_counts(environ, start_response):
         data = bp_perf.transactions_per_block
-        chart = pygal.Bar(width=1000, height=600)
+        chart = pygal.Bar(width=1200, height=600)
         chart.title = "Transactions per Block"
         for producer, action_counts in sorted(data.items()):
             if not hasattr(chart, 'x_labels'):
@@ -340,124 +350,123 @@ def index(bp_perf):
             <nav class="navbar navbar-dark" style="background-color: #a301b5;">
               <div class="navbar-brand">Block Producer Performance</div>
             </nav>
-            <div class="container">
-              <ul class="nav nav-pills" style="padding-top: 1rem;">
-                <li class="nav-item">
-                  <a class="nav-link active"
-                      id="about-tab"
-                      data-toggle="tab"
+            <div class="container-fluid">
+              <div class="row" style="padding-top: 1rem;">
+                <nav
+                    class="nav nav-pills flex-column col-xs-12 col-md-3 col-xl-2"
+                    role="tablist"
+                    aria-orientation="vertical">
+                  <a id="about-tab"
+                      class="nav-link active"
+                      data-toggle="pill"
                       href="#about"
                       role="tab"
                       aria-controls="about"
                       aria-selected="true">
                     About
                   </a>
-                </li>
-                <li class="nav-item">
-                  <a class="nav-link"
-                      id="missed-slots-tab"
-                      data-toggle="tab"
-                      href="#missed-slots"
-                      role="tab"
-                      aria-controls="missed-slots"
-                      aria-selected="true">
-                    Missed Slots
-                  </a>
-                </li>
-                <li class="nav-item">
-                  <a class="nav-link"
-                      id="transactions-per-block-tab"
-                      data-toggle="tab"
+                  <a id="transactions-per-block-tab"
+                      class="nav-link"
+                      data-toggle="pill"
                       href="#transactions-per-block"
                       role="tab"
                       aria-controls="transactions-per-block"
-                      aria-selected="true">
+                      aria-selected="false">
                     Transactions per Block
                   </a>
-                </li>
-                {% for chart in charts.keys() %}
-                  <li class="nav-item">
-                    <a class="nav-link"
-                        id="{{ chart.replace(' ', '') }}-tab"
-                        data-toggle="tab"
+                  <span class="nav-item nav-link">Missed Slots</span>
+                  <a id="missed-slots-tab"
+                      class="nav-link ml-3"
+                      data-toggle="pill"
+                      href="#missed-slots"
+                      role="tab"
+                      aria-controls="missed-slots"
+                      aria-selected="false">
+                    By Slot
+                  </a>
+                  <span class="nav-item nav-link">Action Timings</span>
+                  {% for chart in charts.keys() %}
+                    <a id="{{ chart.replace(' ', '') }}-tab"
+                        class="nav-link ml-3"
+                        data-toggle="pill"
                         href="#{{ chart.replace(' ', '') }}"
                         role="tab"
                         aria-controls="{{ chart.replace(' ', '') }}"
-                        aria-selected="true">
+                        aria-selected="false">
                       {{ chart }}
                     </a>
-                  </li>
-                {% endfor %}
-              </ul>
-              <div class="tab-content" style="padding-top: 1rem;">
-                <div class="tab-pane active"
-                    id="about"
-                    role="tabpanel"
-                    aria-labelledby="about-tab">
-                  <p>
-                    CPU billing in EOS is a bit different to other
-                    smart-contract based chains. CPU usage isn't objectively
-                    calculated, but measured - block producers run your
-                    transaction, time how long it took, and bill you
-                    accordingly.
-                  </p>
-                  <p>
-                    This makes it vitally important that you vote
-                    for good block producers. If a block producer uses cheap
-                    hardware, then they'll end up billing too much CPU, or
-                    billing CPU unfairly, which limits chain scalability. Even
-                    worse, a malicious block producer could overcharge an
-                    account that they don't like.
-                  </p>
-                  <p>
-                    Luckily, it's possible to keep an eye on how much block
-                    producers are billing.
-                  </p>
-                  <p>
-                    This site graphs the time block producers bill for a
-                    selection of common transaction types, over the last day
-                    (or the last 300 transactions of that type for the most
-                    common transaction types). Lower numbers are better, and
-                    more consistent numbers are better (on the box plots, this
-                    means bigger boxes are bad, and outliers, points way
-                    outside the boxes, are bad).
-                  </p>
-                  <p>
-                    If you've found this useful, consider donating to
-                    <tt>gmyteojxgmge</tt>. Right now, this site runs on my
-                    crappy home server, and with some donations, I could rent
-                    some less crappy hardware. The source code is at
-                    <a href="https://github.com/jamespic/eos-bp-performance">
-                    https://github.com/jamespic/eos-bp-performance</a>.
-                  </p>
-                  <p>
-                    You can also download the data in CSV form:
-                  </p>
-                  <ul>
-                    <li><a href="/transactions.csv">Transaction Summary</a></li>
-                    <li><a href="/missed_slots.csv">Missed Slots</a></li>
-                  </ul>
-                </div>
-                <div class="tab-pane"
-                    id="missed-slots"
-                    role="tabpanel"
-                    aria-labelledby="missed-slots-tab">
-                  <object data="/missed_slots"></object>
-                </div>
-                <div class="tab-pane"
-                    id="transactions-per-block"
-                    role="tabpanel"
-                    aria-labelledby="transactions-per-block-tab">
-                  <object data="/transactions_per_block"></object>
-                </div>
-                {% for chart in charts.keys() %}
-                  <div class="tab-pane"
-                      id="{{ chart.replace(' ', '') }}"
+                  {% endfor %}
+                </nav>
+                <div class="col-xs-12 col-md-9 col-xl-10 tab-content">
+                  <div class="tab-pane active"
+                      id="about"
                       role="tabpanel"
-                      aria-labelledby="{{ chart.replace(' ', '') }}-tab">
-                    <object data="/chart/{{ chart | urlencode | escape }}"></object>
+                      aria-labelledby="about-tab">
+                    <p>
+                      CPU billing in EOS is a bit different to other
+                      smart-contract based chains. CPU usage isn't objectively
+                      calculated, but measured - block producers run your
+                      transaction, time how long it took, and bill you
+                      accordingly.
+                    </p>
+                    <p>
+                      This makes it vitally important that you vote
+                      for good block producers. If a block producer uses cheap
+                      hardware, then they'll end up billing too much CPU, or
+                      billing CPU unfairly, which limits chain scalability. Even
+                      worse, a malicious block producer could overcharge an
+                      account that they don't like.
+                    </p>
+                    <p>
+                      Luckily, it's possible to keep an eye on how much block
+                      producers are billing.
+                    </p>
+                    <p>
+                      This site graphs the time block producers bill for a
+                      selection of common transaction types, over the last day
+                      (or the last 300 transactions of that type for the most
+                      common transaction types). Lower numbers are better, and
+                      more consistent numbers are better (on the box plots, this
+                      means bigger boxes are bad, and outliers, points way
+                      outside the boxes, are bad).
+                    </p>
+                    <p>
+                      If you've found this useful, consider donating to
+                      <tt>gmyteojxgmge</tt>. Right now, this site runs on my
+                      crappy home server, and with some donations, I could rent
+                      some less crappy hardware. The source code is at
+                      <a href="https://github.com/jamespic/eos-bp-performance">
+                      https://github.com/jamespic/eos-bp-performance</a>.
+                    </p>
+                    <p>
+                      You can also download the data in CSV form:
+                    </p>
+                    <ul>
+                      <li><a href="/transactions.csv">Transaction Summary</a></li>
+                      <li><a href="/missed_slots.csv">Missed Slots</a></li>
+                    </ul>
                   </div>
-                {% endfor %}
+                  <div class="tab-pane"
+                      id="missed-slots"
+                      role="tabpanel"
+                      aria-labelledby="missed-slots-tab">
+                    <object data="/missed_slots"></object>
+                  </div>
+                  <div class="tab-pane"
+                      id="transactions-per-block"
+                      role="tabpanel"
+                      aria-labelledby="transactions-per-block-tab">
+                    <object data="/transactions_per_block"></object>
+                  </div>
+                  {% for chart in charts.keys() %}
+                    <div class="tab-pane"
+                        id="{{ chart.replace(' ', '') }}"
+                        role="tabpanel"
+                        aria-labelledby="{{ chart.replace(' ', '') }}-tab">
+                      <object data="/chart/{{ chart | urlencode | escape }}"></object>
+                    </div>
+                  {% endfor %}
+                </div>
               </div>
             </div>
             <script src="https://code.jquery.com/jquery-3.2.1.slim.min.js"

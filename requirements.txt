@@ -3,4 +3,5 @@ ciso8601
 jinja2
 numpy
 pygal
+renard
 werkzeug

@@ -7,6 +7,7 @@ import renard
 import traceback
 import wrapt
 import sys
+import struct
 import time
 import yaml
 
@@ -173,6 +174,9 @@ def _with_backoff(wrapped, instance, args, kwargs):
         except URLError:
             traceback.print_exc()
 
+def _format_schedule(n):
+    return struct.pack('N', n)
+
 class BlockSummary:
     def __init__(self):
         self.producers = defaultdict(BpData)
@@ -270,7 +274,7 @@ class Database:
     def _save_schedule(self, schedule):
         with self._db.begin(self._schedule_db, write=True) as tx:
             tx.put(
-                schedule['version'],
+                _format_schedule(schedule['version']),
                 pickle.dumps([producer['producer_name'] for producer in schedule['producers']])
             )
 
@@ -281,9 +285,9 @@ class Database:
             return ['eosio']
         else:
             with self._db.begin(self._schedule_db) as tx:
-                data = tx.get(schedule_num)
+                data = tx.get(_format_schedule(schedule_num))
                 if data:
-                    return pickle.loads(schedule)
+                    return pickle.loads(data)
 
     def stop(self):
         self._stopped = True

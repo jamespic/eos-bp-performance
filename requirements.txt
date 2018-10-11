@@ -1,6 +1,7 @@
 cheroot
 ciso8601
 jinja2
+lmdb
 numpy
 pygal
 renard

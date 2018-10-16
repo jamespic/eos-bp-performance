@@ -16,6 +16,7 @@ from collections import defaultdict
 from multiprocessing.pool import ThreadPool
 from urllib.request import urlopen
 from urllib.error import URLError
+from http.client import HTTPException
 
 _timing_buckets = list(renard.rrange(renard.R20, 100, 500000))
 
@@ -118,9 +119,9 @@ class BpData:
 
     def __add__(self, other):
         result = BpData()
-        for sig, data in self.tx_data.items:
+        for sig, data in self.tx_data.items():
             result.tx_data[sig] += data
-        for sig, data in other.tx_data.items:
+        for sig, data in other.tx_data.items():
             result.tx_data[sig] += data
         result.slots_passed = [a + b for a, b in zip(self.slots_passed, other.slots_passed)]
         result.blocks_produced = [a + b for a, b in zip(self.blocks_produced, other.blocks_produced)]
@@ -135,6 +136,13 @@ class BpData:
         result.slots_passed = [a - b for a, b in zip(self.slots_passed, other.slots_passed)]
         result.blocks_produced = [a - b for a, b in zip(self.blocks_produced, other.blocks_produced)]
         return result
+
+    def minify(self):
+        for sig, data in list(self.tx_data.items()):
+            if data.count == 0:
+                del self.tx_data[sig]
+        return self
+
 
 def _timestamp_to_slot(timestamp):
     epoch_time = timestamp - datetime.datetime.fromtimestamp(946684800)
@@ -171,7 +179,7 @@ def _with_backoff(wrapped, instance, args, kwargs):
     for _ in _backoff():
         try:
             return wrapped(*args, **kwargs)
-        except URLError:
+        except (URLError, HTTPException):
             traceback.print_exc()
 
 def _format_schedule(n):
@@ -182,6 +190,19 @@ class BlockSummary:
         self.producers = defaultdict(BpData)
         self.last_block_num = None
         self.last_schedule_num = None
+
+    def __sub__(self, other):
+        result = BlockSummary()
+        result.last_block_num = self.last_block_num
+        result.last_schedule_num = self.last_schedule_num
+        for producer_name in self.producers.keys():
+            if producer_name in other.producers:
+                bp_data = self.producers[producer_name] - other.producers[producer_name]
+            else:
+                bp_data = self.producers[producer_name]
+            if bp_data.slots_passed_total > 0:
+                result.producers[producer_name] = bp_data.minify()
+        return result
 
 
 class Database:
@@ -258,12 +279,15 @@ class Database:
 
     def _maybe_save_block(self):
         slot = _timestamp_to_slot(self.timestamp)
-        if slot % (21 * 12) == 0:
+        if slot % (21 * 12 * 10) == 0: # Save data every 10 epochs - every 21 minutes
             print(
                 f"Saving block {self.current_block.last_block_num} at timestamp {self.timestamp}",
                 file=sys.stderr
             )
-            print(yaml.dump(self.current_block))
+            print(yaml.dump({
+                producer_name: producer.blocks_produced_total
+                for producer_name, producer in self.current_block.producers.items()
+            }))
             with self._db.begin(self._block_db, write=True) as tx:
                 tx.put(
                     self.timestamp.isoformat().encode('ascii'),
@@ -311,3 +335,22 @@ class Database:
                 }).encode('utf-8')
             ).read().decode('utf-8', errors='replace')
         )
+
+    def fetch_by_time_range(self, start=None, end=None, step=datetime.timedelta(seconds=60*21)):
+        with self._db.begin(self._block_db) as tx, tx.cursor() as cursor:
+            if not start:
+                cursor.first()
+                start = parse_datetime(cursor.key().decode('ascii'))
+            if not cursor.set_range(start.isoformat().encode('ascii')):
+                return {}
+            last_time = parse_datetime(cursor.key().decode('ascii'))
+            last_block = pickle.loads(cursor.value())
+            result = {}
+            while ((end is None or next_time <= end)
+                    and cursor.set_range((last_time + step).isoformat().encode('ascii'))):
+                next_time = parse_datetime(cursor.key().decode('ascii'))
+                next_block = pickle.loads(cursor.value())
+                result[next_time] = next_block - last_block
+                last_time = next_time
+                last_block = next_block
+            return result

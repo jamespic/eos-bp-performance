@@ -19,7 +19,8 @@ def transactions_over_time(db):
         producers = {
             producer_name
             for block in raw_data.values()
-            for producer_name in block.producers.keys()
+            for producer_name, bp_data in block.producers.items()
+            if method in bp_data.tx_data
         }
         data = {
             producer_name: {

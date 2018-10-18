@@ -336,6 +336,26 @@ class Database:
             ).read().decode('utf-8', errors='replace')
         )
 
+    def fetch_single(self, start=None, end=None):
+        with self._db.begin(self._block_db) as tx, tx.cursor() as cursor:
+            if not start:
+                cursor.first()
+                start = parse_datetime(cursor.key().decode('ascii'))
+            if not cursor.set_range(start.isoformat().encode('ascii')):
+                raise Exception('No data in range')
+            first_block = pickle.loads(cursor.value())
+
+
+            if not end:
+                cursor.last()
+                end = parse_datetime(cursor.key().decode('ascii'))
+            if not cursor.set_range(end.isoformat().encode('ascii')):
+                raise Exception('No data in range')
+            last_block = pickle.loads(cursor.value())
+
+            return last_block - first_block
+
+
     def fetch_by_time_range(self, start=None, end=None, step=datetime.timedelta(seconds=60*21)):
         with self._db.begin(self._block_db) as tx, tx.cursor() as cursor:
             if not start:

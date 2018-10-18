@@ -340,16 +340,14 @@ class Database:
         with self._db.begin(self._block_db) as tx, tx.cursor() as cursor:
             if not start:
                 cursor.first()
-                start = parse_datetime(cursor.key().decode('ascii'))
-            if not cursor.set_range(start.isoformat().encode('ascii')):
+            elif not cursor.set_range(start.isoformat().encode('ascii')):
                 raise Exception('No data in range')
             first_block = pickle.loads(cursor.value())
 
 
             if not end:
                 cursor.last()
-                end = parse_datetime(cursor.key().decode('ascii'))
-            if not cursor.set_range(end.isoformat().encode('ascii')):
+            elif not cursor.set_range(end.isoformat().encode('ascii')):
                 raise Exception('No data in range')
             last_block = pickle.loads(cursor.value())
 
@@ -366,9 +364,10 @@ class Database:
             last_time = parse_datetime(cursor.key().decode('ascii'))
             last_block = pickle.loads(cursor.value())
             result = {}
-            while ((end is None or next_time <= end)
-                    and cursor.set_range((last_time + step).isoformat().encode('ascii'))):
+            while (cursor.set_range((last_time + step).isoformat().encode('ascii'))):
                 next_time = parse_datetime(cursor.key().decode('ascii'))
+                if end is not None and next_time > end:
+                    break
                 next_block = pickle.loads(cursor.value())
                 result[next_time] = next_block - last_block
                 last_time = next_time

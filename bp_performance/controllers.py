@@ -54,7 +54,7 @@ def _data_from_range_query_string(db, qs):
     query = parse_qs(qs)
     start = parse_datetime(query['from'][-1]) if 'from' in query else None
     end = parse_datetime(query['to'][-1]) if 'to' in query else None
-    step = datetime.timedelta(seconds=float(query['step'][-1])) if 'step' in query else None
+    step = datetime.timedelta(seconds=float(query['step'][-1]) if 'step' in query else 1260)
     return db.fetch_by_time_range(start, end, step)
 
 def _data_from_single_query_string(db, qs):

@@ -7,7 +7,7 @@ import wrapt
 from urllib.parse import parse_qs
 from pygal.util import cached_property
 
-WIDTH, HEIGHT = 1200, 600
+WIDTH, HEIGHT = 1500, 1000
 
 def time_graph(data, environ, start_response, title=None, filename=''):
     if filename.endswith('.csv'):
@@ -42,7 +42,7 @@ class _StatsBoxPlot(pygal.Box):
         return [values[0].quantile(x) for x in [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]], []
 
     def _value_format(self, values, serie):
-        return 'Min: {0}\n5th Percentile : {1}\n25th Percentile : {2}\nMedian : {3}\n75th Percentile {4}\n95th Percentile: {5}\nMax: {6}'.format(*[self._y_format(x) for x in serie.points])
+        return 'Min: {0}\n5th Percentile : {1}\n25th Percentile : {2}\nMedian : {3}\n75th Percentile {4}\n95th Percentile: {5}\nMax: {6}\nMean: {7}\nStandard Deviation: {8}'.format(*[self._y_format(x) for x in serie.points], values.mean, values.stddev)
 
     @cached_property
     def _min(self):
@@ -62,7 +62,39 @@ class _StatsBoxPlot(pygal.Box):
 
 def stats_box_plot(data, environ, start_response, title=None, filename=''):
     if filename.endswith('.csv'):
-        raise NotImplementedError()
+        filename = re.sub(r'[^\.\w]+', '_', filename)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, [
+            'Block Producer',
+            'Minimum',
+            '5th Percentile',
+            '25th Percentile',
+            'Median',
+            '75th Percentile',
+            '95th Percentile',
+            'Maximum',
+            'Mean',
+            'Standard Deviation'
+        ])
+        writer.writeheader()
+        for bp, stats in data.items():
+            writer.writerow({
+                'Block Producer': bp,
+                'Minimum': stats.quantile(0.0),
+                '5th Percentile': stats.quantile(0.05),
+                '25th Percentile': stats.quantile(0.25),
+                'Median': stats.quantile(0.5),
+                '75th Percentile': stats.quantile(0.75),
+                '95th Percentile': stats.quantile(0.95),
+                'Maximum': stats.quantile(1.0),
+                'Mean': stats.mean,
+                'Standard Deviation': stats.stddev
+            })
+        start_response('200 OK', [
+            ('Content-Type', 'text/csv; charset=utf-8'),
+            ('Content-Disposition', f'attachment; filename="{filename}"')
+        ])
+        return [buf.getvalue().encode('utf-8')]
     else:
         chart = _StatsBoxPlot(**width_and_height(environ))
         chart.title = title or filename

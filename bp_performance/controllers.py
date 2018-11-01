@@ -51,6 +51,32 @@ def transaction_box(db):
     return render_transactions_over_time
 
 
+def missed_slots_over_time(db):
+    def render_missed_slots_over_time(environ, start_response):
+        query_string = environ.get('QUERY_STRING', '')
+        filename = pop_path_info(environ)
+        raw_data = _data_from_range_query_string(db, query_string)
+        producers = {
+            producer_name
+            for block in raw_data.values()
+            for producer_name in block.producers.keys()
+        }
+        data = {
+            producer_name: {
+                timestamp:
+                    total_blocks_missed_percent(block.producers[producer_name])
+                for timestamp, block in raw_data.items()
+                if producer_name in block.producers
+            } for producer_name in producers
+        }
+        return time_graph(data, environ, start_response, 'Missed Slots', filename)
+    return render_missed_slots_over_time
+
+
+def total_blocks_missed_percent(producer):
+    return 100 * (producer.slots_passed_total - producer.blocks_produced_total) / producer.slots_passed_total
+
+
 def yaml_time_range(db):
     def render_yaml_time_range(environ, start_response):
         data = _data_from_range_query_string(db, environ.get('QUERY_STRING', ''))

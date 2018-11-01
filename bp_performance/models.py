@@ -119,29 +119,33 @@ class BpData:
 
     def __add__(self, other):
         result = BpData()
-        for sig, data in self.tx_data.items():
-            result.tx_data[sig] += data
-        for sig, data in other.tx_data.items():
-            result.tx_data[sig] += data
+        for sig in set(self.tx_data.keys()) | set(other.tx_data.keys()):
+            if sig not in self.tx_data:
+                result.tx_data[sig] = other.tx_data[sig]
+            elif sig not in other.tx_data:
+                result.tx_data[sig] = self.tx_data[sig]
+            else:
+                data = self.tx_data[sig]
+                other_data = other.tx_data[sig]
+                if data.count != other_data.count:
+                    result.tx_data[sig] = data + other_data
         result.slots_passed = [a + b for a, b in zip(self.slots_passed, other.slots_passed)]
         result.blocks_produced = [a + b for a, b in zip(self.blocks_produced, other.blocks_produced)]
         return result
 
     def __sub__(self, other):
         result = BpData()
-        for sig, data in self.tx_data.items():
-            result.tx_data[sig] += data
-        for sig, data in other.tx_data.items():
-            result.tx_data[sig] -= data
+        for sig in self.tx_data.keys():
+            if sig not in other.tx_data:
+                result.tx_data[sig] = self.tx_data[sig]
+            else:
+                data = self.tx_data[sig]
+                other_data = other.tx_data[sig]
+                if data.count != other_data.count:
+                    result.tx_data[sig] = data - other_data
         result.slots_passed = [a - b for a, b in zip(self.slots_passed, other.slots_passed)]
         result.blocks_produced = [a - b for a, b in zip(self.blocks_produced, other.blocks_produced)]
         return result
-
-    def minify(self):
-        for sig, data in list(self.tx_data.items()):
-            if data.count == 0:
-                del self.tx_data[sig]
-        return self
 
 
 def _timestamp_to_slot(timestamp):
@@ -197,11 +201,12 @@ class BlockSummary:
         result.last_schedule_num = self.last_schedule_num
         for producer_name in self.producers.keys():
             if producer_name in other.producers:
-                bp_data = self.producers[producer_name] - other.producers[producer_name]
+                this_data = self.producers[producer_name]
+                that_data = other.producers[producer_name]
+                if this_data.slots_passed_total != that_data.slots_passed_total:
+                    result.producers[producer_name] = self.producers[producer_name] - other.producers[producer_name]
             else:
-                bp_data = self.producers[producer_name]
-            if bp_data.slots_passed_total > 0:
-                result.producers[producer_name] = bp_data.minify()
+                result.producers[producer_name] = self.producers[producer_name]
         return result
 
 
@@ -354,11 +359,16 @@ class Database:
             return last_block - first_block
 
 
-    def fetch_by_time_range(self, start=None, end=None, step=datetime.timedelta(seconds=60*21)):
+    def fetch_by_time_range(self, start=None, end=None, step=datetime.timedelta(seconds=60*21), max_steps=100):
         with self._db.begin(self._block_db) as tx, tx.cursor() as cursor:
             if not start:
                 cursor.first()
                 start = parse_datetime(cursor.key().decode('ascii'))
+            if not end:
+                cursor.last()
+                end = parse_datetime(cursor.key().decode('ascii'))
+            if step * max_steps < (end - start):
+                step = (end - start) / max_steps
             if not cursor.set_range(start.isoformat().encode('ascii')):
                 return {}
             last_time = parse_datetime(cursor.key().decode('ascii'))
@@ -366,7 +376,7 @@ class Database:
             result = {}
             while (cursor.set_range((last_time + step).isoformat().encode('ascii'))):
                 next_time = parse_datetime(cursor.key().decode('ascii'))
-                if end is not None and next_time > end:
+                if next_time > end:
                     break
                 next_block = pickle.loads(cursor.value())
                 result[next_time] = next_block - last_block

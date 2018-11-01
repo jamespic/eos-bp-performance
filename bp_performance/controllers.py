@@ -5,7 +5,7 @@ from ciso8601 import parse_datetime
 from urllib.parse import parse_qs
 from werkzeug.wsgi import pop_path_info
 
-from .views import time_graph
+from .views import time_graph, stats_box_plot
 
 
 def transactions_over_time(db):
@@ -32,6 +32,22 @@ def transactions_over_time(db):
             } for producer_name in producers
         }
         return time_graph(data, environ, start_response, method, filename)
+    return render_transactions_over_time
+
+
+def transaction_box(db):
+    def render_transactions_over_time(environ, start_response):
+        query_string = environ.get('QUERY_STRING', '')
+        filename = pop_path_info(environ)
+        method = filename.rsplit('.', 1)[0]
+        raw_data = _data_from_single_query_string(db, query_string)
+        query = parse_qs(query_string)
+        quantile = float(query['percentile'][-1]) / 100 if 'percentile' in query else 0.90
+        data = {
+            producer_name: producer_data.tx_data[method]
+            for producer_name, producer_data in raw_data.producers.items()
+        }
+        return stats_box_plot(data, environ, start_response, method, filename)
     return render_transactions_over_time
 
 

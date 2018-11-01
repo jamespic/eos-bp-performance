@@ -179,7 +179,7 @@ def _with_backoff(wrapped, instance, args, kwargs):
     for _ in _backoff():
         try:
             return wrapped(*args, **kwargs)
-        except (URLError, HTTPException):
+        except (URLError, HTTPException, ConnectionError):
             traceback.print_exc()
 
 def _format_schedule(n):

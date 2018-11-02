@@ -5,7 +5,7 @@ from ciso8601 import parse_datetime
 from urllib.parse import parse_qs
 from werkzeug.wsgi import pop_path_info
 
-from .views import time_graph, stats_box_plot
+from .views import time_graph, stats_box_plot, bar_chart
 
 
 def transactions_over_time(db):
@@ -16,12 +16,12 @@ def transactions_over_time(db):
         raw_data = _data_from_range_query_string(db, query_string)
         query = parse_qs(query_string)
         quantile = float(query['percentile'][-1]) / 100 if 'percentile' in query else 0.90
-        producers = {
+        producers = sorted({
             producer_name
             for block in raw_data.values()
             for producer_name, bp_data in block.producers.items()
             if method in bp_data.tx_data
-        }
+        })
         data = {
             producer_name: {
                 timestamp:
@@ -36,7 +36,7 @@ def transactions_over_time(db):
 
 
 def transaction_box(db):
-    def render_transactions_over_time(environ, start_response):
+    def render_transactions_box(environ, start_response):
         query_string = environ.get('QUERY_STRING', '')
         filename = pop_path_info(environ)
         method = filename.rsplit('.', 1)[0]
@@ -45,10 +45,10 @@ def transaction_box(db):
         quantile = float(query['percentile'][-1]) / 100 if 'percentile' in query else 0.90
         data = {
             producer_name: producer_data.tx_data[method]
-            for producer_name, producer_data in raw_data.producers.items()
+            for producer_name, producer_data in sorted(raw_data.producers.items())
         }
         return stats_box_plot(data, environ, start_response, method, filename)
-    return render_transactions_over_time
+    return render_transactions_box
 
 
 def missed_slots_over_time(db):
@@ -56,11 +56,11 @@ def missed_slots_over_time(db):
         query_string = environ.get('QUERY_STRING', '')
         filename = pop_path_info(environ)
         raw_data = _data_from_range_query_string(db, query_string)
-        producers = {
+        producers = sorted({
             producer_name
             for block in raw_data.values()
             for producer_name in block.producers.keys()
-        }
+        })
         data = {
             producer_name: {
                 timestamp:
@@ -73,9 +73,27 @@ def missed_slots_over_time(db):
     return render_missed_slots_over_time
 
 
+def missed_slots(db):
+    def render_missed_slots(environ, start_response):
+        query_string = environ.get('QUERY_STRING', '')
+        filename = pop_path_info(environ)
+        raw_data = _data_from_single_query_string(db, query_string)
+        x_labels = sorted(raw_data.producers.keys())
+        data = {
+            f'Slot {i + 1}': [
+                blocks_missed_percent(data, i)
+                for producer, data in sorted(raw_data.producers.items())
+            ] for i in range(12)
+        }
+        return bar_chart(x_labels, data, environ, start_response, 'Missed Slots', filename)
+    return render_missed_slots
+
+
 def total_blocks_missed_percent(producer):
     return 100 * (producer.slots_passed_total - producer.blocks_produced_total) / producer.slots_passed_total
 
+def blocks_missed_percent(producer, slot):
+    return 100 * (producer.slots_passed[slot] - producer.blocks_produced[slot]) / producer.slots_passed[slot]
 
 def yaml_time_range(db):
     def render_yaml_time_range(environ, start_response):

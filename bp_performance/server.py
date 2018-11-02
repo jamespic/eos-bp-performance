@@ -2,7 +2,7 @@ import argparse
 import threading
 from pathlib import Path
 from cheroot.wsgi import Server, PathInfoDispatcher
-from .controllers import yaml_time_range, yaml_single, transactions_over_time, transaction_box, missed_slots_over_time
+from .controllers import yaml_time_range, yaml_single, transactions_over_time, transaction_box, missed_slots_over_time, missed_slots
 from .middleware import cache_middleware
 from .models import Database
 
@@ -24,7 +24,8 @@ if __name__ == '__main__':
         '/single.yaml': yaml_single(db),
         '/transactions-over-time': transactions_over_time(db),
         '/transactions-box': transaction_box(db),
-        '/missed-slots-over-time': missed_slots_over_time(db)
+        '/missed-slots-over-time': missed_slots_over_time(db),
+        '/missed-slots': missed_slots(db)
     }))
 
 

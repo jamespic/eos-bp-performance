@@ -37,29 +37,6 @@ def time_graph(data, environ, start_response, title=None, filename=''):
         start_response('200 OK', [('Content-Type', 'image/svg+xml')])
         return [rendered]
 
-class _StatsBoxPlot(pygal.Box):
-    def _box_points(self, values, mode=None):
-        return [values[0].quantile(x) for x in [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]], []
-
-    def _value_format(self, values, serie):
-        return 'Min: {0}\n5th Percentile : {1}\n25th Percentile : {2}\nMedian : {3}\n75th Percentile {4}\n95th Percentile: {5}\nMax: {6}\nMean: {7}\nStandard Deviation: {8}'.format(*[self._y_format(x) for x in serie.points], values.mean, values.stddev)
-
-    @cached_property
-    def _min(self):
-        """Getter for the minimum series value"""
-        return (
-            self.range[0] if (self.range and self.range[0] is not None) else
-            (min(x.quantile(0.05) for x in self._values) if self._values else None)
-        )
-
-    @cached_property
-    def _max(self):
-        """Getter for the maximum series value"""
-        return (
-            self.range[1] if (self.range and self.range[1] is not None) else
-            (max(x.quantile(0.95) for x in self._values) if self._values else None)
-        )
-
 def stats_box_plot(data, environ, start_response, title=None, filename=''):
     if filename.endswith('.csv'):
         filename = re.sub(r'[^\.\w]+', '_', filename)
@@ -100,6 +77,54 @@ def stats_box_plot(data, environ, start_response, title=None, filename=''):
         chart.title = title or filename
         for series_name, series in data.items():
             chart.add(series_name, series)
+        rendered = chart.render()
+        start_response('200 OK', [('Content-Type', 'image/svg+xml')])
+        return [rendered]
+
+class _StatsBoxPlot(pygal.Box):
+    def _box_points(self, values, mode=None):
+        return [values[0].quantile(x) for x in [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0]], []
+
+    def _value_format(self, values, serie):
+        return (
+            'Min: {0}\n'
+            '5th Percentile : {1}\n'
+            '25th Percentile : {2}\n'
+            'Median : {3}\n'
+            '75th Percentile {4}\n'
+            '95th Percentile: {5}\n'
+            'Max: {6}\n'
+            'Mean: {7}\n'
+            'Standard Deviation: {8}'.format(
+                *[self._y_format(x) for x in serie.points], values.mean, values.stddev
+            )
+        )
+
+    @cached_property
+    def _min(self):
+        """Getter for the minimum series value"""
+        return (
+            self.range[0] if (self.range and self.range[0] is not None) else
+            (min(x.quantile(0.05) for x in self._values) if self._values else None)
+        )
+
+    @cached_property
+    def _max(self):
+        """Getter for the maximum series value"""
+        return (
+            self.range[1] if (self.range and self.range[1] is not None) else
+            (max(x.quantile(0.95) for x in self._values) if self._values else None)
+        )
+
+def bar_chart(x_labels, series, environ, start_response, title=None, filename=''):
+    if filename.endswith('.csv'):
+        raise NotImplemented()
+    else:
+        chart = pygal.Bar(**width_and_height(environ))
+        chart.title = title or filename
+        chart.x_labels = x_labels
+        for series_name, series_data in series.items():
+            chart.add(series_name, series_data)
         rendered = chart.render()
         start_response('200 OK', [('Content-Type', 'image/svg+xml')])
         return [rendered]
